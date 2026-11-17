@@ -30,7 +30,7 @@ export class AuthController {
     @Post('logout')
     @UseGuards(JwtAuthGuard)
     @HttpCode(200)
-    logout(@Req() req: { user: { userId: string } }) {
-        return this.authService.logout(req.user.userId);
+    logout(@Req() req: { user: { _id: string } }) {
+        return this.authService.logout(req.user._id);
     };
 }
