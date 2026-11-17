@@ -4,7 +4,7 @@ Tài liệu mô tả **hiện trạng thực tế** của backend. Backend là R
 
 - Đăng ký / đăng nhập bằng email + mật khẩu.
 - **JWT access token + refresh token** (refresh token được hash trước khi lưu DB).
-- Guard bảo vệ một số route (`GET /user/me`, `POST /auth/logout`).
+- Guard bảo vệ một số route (`GET /users/me`, `POST /auth/logout`).
 - CRUD người dùng cơ bản.
 
 Tài liệu tập trung vào **luồng hoạt động** (request đi qua những tầng nào, service nào làm gì), kèm API reference và các lưu ý hiện tại.
@@ -39,11 +39,11 @@ AppModule
 ├── UserModule
 │   ├── MongooseModule.forFeature(User)
 │   ├── UserController ──► UserService
-│   └── exports: UserService
+│   └── exports: UserService, MongooseModule
 └── AuthModule
-    ├── imports: UserModule, JWTModule, MongooseModule.forFeature(User), PassportModule
+    ├── imports: UserModule, JwtConfigModule, PassportModule
     ├── AuthController ──► AuthService
-    ├── AuthService ──► UserService (query thô) + User model (refresh token)
+    ├── AuthService ──► UserService (query thô) + User model (lấy từ UserModule export)
     ├── JwtStrategy (provider, đăng ký passport strategy 'jwt')
     └── JwtAuthGuard (dùng qua @UseGuards, không cần đăng ký provider)
 ```
@@ -51,7 +51,10 @@ AppModule
 Điểm quan trọng:
 
 - `AuthModule` **import `UserModule`** để dùng `UserService` cho các truy vấn thô (`findByEmail`, `findById`) và `createUser` khi đăng ký.
+- `UserModule` export luôn `MongooseModule` nên `AuthModule` dùng chung User model provider, **không đăng ký schema hai lần**.
 - `AuthService` **inject thêm User model** để đọc/ghi `refreshToken` — phần này thuộc vòng đời token, không đặt trong `UserService`.
+- Hash/so sánh mật khẩu dùng chung `common/utils/password.util.ts` (bcrypt + salt rounds), tránh lặp hằng số ở hai service.
+- `UserService.toResponse(user)` map document sang `IUserResponse`; `password`, `refreshToken` có `select: false` nên không xuất hiện trong query mặc định.
 - `UserController` dùng `JwtAuthGuard` của Auth. Guard không inject service nào nên không tạo phụ thuộc vòng giữa hai module.
 - `JwtStrategy` được khai báo trong `providers` của `AuthModule`; khi app khởi động, passport đăng ký strategy `jwt` toàn cục.
 
@@ -68,9 +71,8 @@ src/main.ts
   │    ├─ DatabaseModule                            → kết nối MongoDB bằng MONGODB_URI
   │    ├─ AuthModule
   │    │    ├─ JwtModule.registerAsync              → đọc JWT_ACCESS_SECRET + JWT_ACCESS_EXPIRES_IN
-  │    │    ├─ MongooseModule.forFeature(User)
   │    │    └─ JwtStrategy khởi tạo                 → passport dùng JWT_ACCESS_SECRET
-  │    └─ UserModule
+  │    └─ UserModule ── MongooseModule.forFeature(User)
   ├─ app.useGlobalPipes(ValidationPipe)             → whitelist, transform, forbidNonWhitelisted
   └─ app.listen(PORT ?? 3000)
 ```
@@ -105,7 +107,7 @@ Lưu ý:
 
 - `RegisterDto` **kế thừa toàn bộ validator** của `CreateUserDto` (name, email, password).
 - Đăng ký thành công **cấp luôn token** giống login (rotation/ghi đè `refreshToken` như luồng login).
-- Object `user` trong response không chứa `password` lẫn `refreshToken` (hash nằm trong DB, `toJSON` transform loại bỏ).
+- Object `user` trong response được map bằng `UserService.toResponse`, không chứa `password` lẫn `refreshToken`.
 
 ### 4.2. Đăng nhập — `POST /auth/login`
 
@@ -124,8 +126,8 @@ AuthService.validateUser
        └─ sai mật khẩu → 401 "Invalid credentials"
   ▼
 AuthService.generateTokens
-  ├─ accessToken  = jwtService.signAsync({ sub, email })            (JWT_ACCESS_SECRET, JWT_ACCESS_EXPIRES_IN)
-  ├─ refreshToken = jwtService.signAsync({ sub, email }, options)   (JWT_REFRESH_SECRET, JWT_REFRESH_EXPIRES_IN)
+  ├─ accessToken  = jwtService.signAsync({ _id, email })            (JWT_ACCESS_SECRET, JWT_ACCESS_EXPIRES_IN)
+  ├─ refreshToken = jwtService.signAsync({ _id, email }, options)   (JWT_REFRESH_SECRET, JWT_REFRESH_EXPIRES_IN)
   └─ bcrypt.hash(refreshToken) → lưu vào user.refreshToken
   ▼
 200 OK { user, accessToken, refreshToken }
@@ -133,16 +135,16 @@ AuthService.generateTokens
 
 Chi tiết:
 
-- Access token và refresh token được ký **song song** (`Promise.all`), cùng payload `{ sub: user._id, email }`.
+- Access token và refresh token được ký **song song** (`Promise.all`), cùng payload `{ _id: String(user._id), email }`.
 - Refresh token **không lưu plaintext** — DB chỉ giữ bcrypt hash.
-- `user` trả về là Mongoose document; `toJSON` transform tự xoá `password`, `refreshToken` và `__v`.
+- `user` trả về được map bằng `UserService.toResponse` (shape `IUserResponse`); mọi response đi qua mapper thay vì serialize document.
 - Mỗi lần login, refresh token cũ bị **ghi đè** (chỉ phiên gần nhất còn hiệu lực).
 
-### 4.3. Gọi route được bảo vệ (ví dụ `GET /user/me`)
+### 4.3. Gọi route được bảo vệ (ví dụ `GET /users/me`)
 
 ```text
 Client
-  │ GET /user/me
+  │ GET /users/me
   │ Authorization: Bearer <accessToken>
   ▼
 JwtAuthGuard (AuthGuard('jwt'))
@@ -150,11 +152,11 @@ JwtAuthGuard (AuthGuard('jwt'))
 JwtStrategy
   ├─ verify chữ ký + hạn dùng bằng JWT_ACCESS_SECRET
   │    └─ thiếu token / sai / hết hạn → 401 "Unauthorized"
-  └─ validate(payload) → req.user = { userId: payload.sub, email: payload.email }
+  └─ validate(payload) → req.user = { _id: payload._id, email: payload.email }
   ▼
 UserController.getProfile
   ▼
-UserService.findOne(req.user.userId)
+UserService.findOne(req.user._id)
   ├─ findById (query thô)
   └─ ensureFound → 404 "User not found" nếu không còn tồn tại
   ▼
@@ -174,7 +176,7 @@ ValidationPipe (RefreshTokenDto)
 AuthService.refreshTokens
   ├─ jwtService.verifyAsync(refreshToken, { secret: JWT_REFRESH_SECRET })
   │    └─ sai chữ ký / hết hạn → 401 "Invalid refresh token"
-  ├─ userModel.findById(payload.sub).select('+refreshToken')
+  ├─ userModel.findById(payload._id).select('+refreshToken')
   │    └─ user không tồn tại hoặc chưa từng login → 401 "Access denied"
   ├─ bcrypt.compare(refreshToken, user.refreshToken)
   │    └─ không khớp → 401 "Access denied"
@@ -198,10 +200,10 @@ Client
   │ POST /auth/logout
   │ Authorization: Bearer <accessToken>
   ▼
-JwtAuthGuard → req.user.userId
+JwtAuthGuard → req.user._id
   ▼
 AuthService.logout
-  └─ userModel.findByIdAndUpdate(userId, { refreshToken: null })
+  └─ userModel.findByIdAndUpdate(_id, { refreshToken: null })
   ▼
 200 OK { "message": "Logged out successfully" }
 ```
@@ -212,17 +214,17 @@ Lưu ý:
 - Refresh token bị xoá → không thể refresh được nữa.
 - Access token là JWT stateless nên **vẫn dùng được đến khi hết hạn** (không có blacklist).
 
-### 4.6. CRUD user — `/user`
+### 4.6. CRUD user — `/users`
 
 ```text
-GET    /user        → UserService.findAll()          → mảng user (public)
-GET    /user/:id    → ParseObjectIdPipe → findOne     → 400 nếu id sai, 404 nếu không có
-GET    /user/me     → JwtAuthGuard → findOne(userId)  → profile của chính mình
-PATCH  /user/:id    → ParseObjectIdPipe → updateUser  → hash password nếu có, 409 nếu email trùng
-DELETE /user/:id    → ParseObjectIdPipe → deleteUser  → 404 nếu không có
+GET    /users        → UserService.findAll()          → mảng user (public)
+GET    /users/:id    → ParseObjectIdPipe → findOne     → 400 nếu id sai, 404 nếu không có
+GET    /users/me     → JwtAuthGuard → findOne(_id)  → profile của chính mình
+PATCH  /users/:id    → ParseObjectIdPipe → updateUser  → hash password nếu có, 409 nếu email trùng
+DELETE /users/:id    → ParseObjectIdPipe → deleteUser  → 404 nếu không có
 ```
 
-`POST /user` đã được **loại bỏ**; việc tạo user chỉ diễn ra qua `POST /auth/register`.
+`POST /users` đã được **loại bỏ**; việc tạo user chỉ diễn ra qua `POST /auth/register`.
 
 ### 4.7. Luồng xử lý lỗi
 
@@ -230,7 +232,7 @@ DELETE /user/:id    → ParseObjectIdPipe → deleteUser  → 404 nếu không c
 Request
   ▼
 ValidationPipe        → 400 (body sai, field lạ)
-ParseObjectIdPipe     → 400 "Invalid user ID"
+ParseObjectIdPipe     → 400 "Invalid id"
 Service (Nest exception)
   ├─ UnauthorizedException → 401
   ├─ NotFoundException     → 404
@@ -271,13 +273,18 @@ backend/
 │   ├── app.service.ts
 │   ├── app.controller.spec.ts
 │   ├── configs/
-│   │   ├── database-module.config.ts    # MongooseModule.forRootAsync
-│   │   └── jwt-module.config.ts         # JwtModule.registerAsync (access secret)
+│   │   ├── database.module.ts           # MongooseModule.forRootAsync
+│   │   └── jwt.module.ts                # JwtModule.registerAsync (access secret)
 │   ├── common/
+│   │   ├── constants/
+│   │   │   ├── app.constant.ts          # SALT_ROUNDS, DUPLICATE_KEY_CODE
+│   │   │   └── messages.constant.ts     # ERROR_MESSAGES, SUCCESS_MESSAGES
 │   │   ├── pipes/
 │   │   │   └── parse-object-id.pipe.ts  # Validate :id là ObjectId
 │   │   └── utils/
-│   │       └── generate-jwt-secret.ts   # Script sinh secret ngẫu nhiên
+│   │       └── password.util.ts         # hashPassword / comparePassword (bcrypt)
+│   ├── scripts/
+│   │   └── generate-jwt-secret.ts       # Script sinh secret ngẫu nhiên
 │   └── modules/
 │       ├── auth/
 │       │   ├── auth.module.ts
@@ -289,15 +296,19 @@ backend/
 │       │   │   └── refresh-token.dto.ts
 │       │   ├── guards/
 │       │   │   └── jwt-auth.guard.ts
+│       │   ├── interfaces/
+│       │   │   └── auth.interface.ts    # IJwtPayload, IAuthTokens, IAuthResult, IAuthenticatedRequest
 │       │   └── strategies/
 │       │       └── jwt.strategy.ts
 │       └── users/
 │           ├── users.module.ts
-│           ├── users.controller.ts      # me + CRUD /user
+│           ├── users.controller.ts      # me + CRUD /users
 │           ├── users.service.ts
 │           ├── dto/
 │           │   ├── create-user.dto.ts
 │           │   └── update-user.dto.ts
+│           ├── interfaces/
+│           │   └── user.interface.ts    # IUserResponse
 │           └── schemas/
 │               └── user.schema.ts
 ├── test/
@@ -342,12 +353,10 @@ JWT_REFRESH_EXPIRES_IN=7d
 Sinh secret nhanh:
 
 ```bash
-npx ts-node src/common/utils/generate-jwt-secret.ts
+npx ts-node src/scripts/generate-jwt-secret.ts
 ```
 
 > `.env` nằm trong `.gitignore`, không commit lên repository.
->
-> **Lưu ý:** `.env` hiện tại đang đặt tên `JWT_REFERESH_SECRET` (sai chính tả). Code ưu tiên đọc `JWT_REFRESH_SECRET`, nếu không có sẽ fallback sang `JWT_REFERESH_SECRET` để không vỡ môi trường hiện tại. Nên sửa `.env` về đúng tên.
 
 ### 7.4. Các lệnh npm
 
@@ -379,10 +388,10 @@ Server mặc định: `http://localhost:3000`.
 | `MONGODB_URI` | **Có** | — | Connection string MongoDB; thiếu → app fail khi khởi động |
 | `JWT_ACCESS_SECRET` | **Có** | — | Secret ký/verify access token; thiếu → app fail khi khởi động |
 | `JWT_ACCESS_EXPIRES_IN` | **Có** | — | Hạn access token (ví dụ `15m`) |
-| `JWT_REFRESH_SECRET` | **Có** (hoặc dùng fallback `JWT_REFERESH_SECRET`) | — | Secret ký/verify refresh token |
+| `JWT_REFRESH_SECRET` | **Có** | — | Secret ký/verify refresh token |
 | `JWT_REFRESH_EXPIRES_IN` | **Có** | — | Hạn refresh token (ví dụ `7d`) |
 
-Access token dùng cấu hình mặc định của `JwtModule` (`jwt-module.config.ts`). Refresh token được ký/verify với secret + expiry truyền trực tiếp trong `AuthService`.
+Access token dùng cấu hình mặc định của `JwtModule` (`jwt.module.ts`). Refresh token được ký/verify với secret + expiry truyền trực tiếp trong `AuthService`.
 
 ### 8.2. ValidationPipe toàn cục (`src/main.ts`)
 
@@ -421,7 +430,7 @@ Collection: `users`
 Hành vi bổ sung trong `user.schema.ts`:
 
 - `password` và `refreshToken` có `select: false` → query mặc định **không** trả về; muốn lấy phải `.select('+password')` hoặc `.select('+refreshToken')`.
-- `toJSON` transform xoá `password`, `refreshToken` và `__v` khỏi response.
+- Không có `toJSON` transform: response shape do `UserService.toResponse` (`users.service.ts`) quyết định theo `IUserResponse` (`interfaces/user.interface.ts`).
 - Unique index trên `email`; vi phạm trả mã lỗi Mongo `11000` → service bắt và ném `409 Conflict`.
 
 ---
@@ -441,11 +450,11 @@ Base URL: `http://localhost:3000`
 | POST | `/auth/login` | Không | 200 | Đăng nhập, cấp access + refresh token |
 | POST | `/auth/refresh` | Refresh token trong body | 200 | Cấp lại cặp token (rotation) |
 | POST | `/auth/logout` | Bearer access token | 200 | Xoá refresh token khỏi DB |
-| GET | `/user/me` | Bearer access token | 200 | Profile của chính mình |
-| GET | `/user` | Không | 200 | Lấy tất cả user |
-| GET | `/user/:id` | Không | 200 | Lấy user theo id |
-| PATCH | `/user/:id` | Không | 200 | Cập nhật user |
-| DELETE | `/user/:id` | Không | 200 | Xóa user |
+| GET | `/users/me` | Bearer access token | 200 | Profile của chính mình |
+| GET | `/users` | Không | 200 | Lấy tất cả user |
+| GET | `/users/:id` | Không | 200 | Lấy user theo id |
+| PATCH | `/users/:id` | Không | 200 | Cập nhật user |
+| DELETE | `/users/:id` | Không | 200 | Xóa user |
 
 ### 10.2. DTO và ràng buộc
 
@@ -592,7 +601,7 @@ Lỗi:
 
 - `401` — thiếu access token / token sai / hết hạn.
 
-### 10.8. `GET /user/me`
+### 10.8. `GET /users/me`
 
 Header:
 
@@ -614,7 +623,7 @@ Response `200`:
 
 Lỗi: `401` (thiếu/sai/hết hạn token), `404` (user đã bị xoá nhưng token còn hạn).
 
-### 10.9. `GET /user`
+### 10.9. `GET /users`
 
 Response `200`: mảng user (không có password, không có refreshToken). Không phân trang, trả toàn bộ.
 
@@ -630,18 +639,18 @@ Response `200`: mảng user (không có password, không có refreshToken). Khô
 ]
 ```
 
-### 10.10. `GET /user/:id`
+### 10.10. `GET /users/:id`
 
-Ví dụ: `GET /user/6720f1c2a1b2c3d4e5f60718`
+Ví dụ: `GET /users/6720f1c2a1b2c3d4e5f60718`
 
 Response `200`: document user.
 
 Lỗi:
 
-- `400` — `"Invalid user ID"` nếu `:id` không phải ObjectId hợp lệ (do `ParseObjectIdPipe`).
+- `400` — `"Invalid id"` nếu `:id` không phải ObjectId hợp lệ (do `ParseObjectIdPipe`).
 - `404` — `"User not found"`.
 
-### 10.11. `PATCH /user/:id`
+### 10.11. `PATCH /users/:id`
 
 Body là một phần của `CreateUserDto` (mọi field optional). Nếu cập nhật `password`, service hash lại bằng bcrypt trước khi lưu.
 
@@ -653,7 +662,7 @@ Body là một phần của `CreateUserDto` (mọi field optional). Nếu cập 
 
 Response `200`: user sau cập nhật (không có password). Lỗi: `400`, `404`, `409` (email trùng).
 
-### 10.12. `DELETE /user/:id`
+### 10.12. `DELETE /users/:id`
 
 Response `200` với body rỗng. Lỗi: `400` (id sai), `404` (không tồn tại).
 
@@ -700,17 +709,17 @@ Lỗi validation trả `message` dạng mảng:
 
 - Hash mật khẩu bằng bcrypt, salt rounds = 10.
 - Refresh token lưu dưới dạng bcrypt hash, không lưu plaintext.
-- Password và refresh token hash không bao giờ trả ra ngoài (`select: false` + `toJSON` transform).
+- Password và refresh token hash không bao giờ trả ra ngoài (`select: false` + `UserService.toResponse`).
 - Login thất bại luôn trả cùng một thông điệp `"Invalid credentials"` (giảm lộ thông tin email tồn tại).
 - Access token và refresh token dùng 2 secret và 2 thời hạn riêng.
 - Refresh token rotation: mỗi lần refresh cấp cặp mới và ghi đè hash cũ.
-- Route `GET /user/me` và `POST /auth/logout` được bảo vệ bằng `JwtAuthGuard`.
+- Route `GET /users/me` và `POST /auth/logout` được bảo vệ bằng `JwtAuthGuard`.
 - Validate chặt input, chặn field lạ; validate ObjectId trước khi query.
 
 Chưa có (cần bổ sung trước khi production):
 
-- Guard cho `GET /user`, `GET /user/:id`, `PATCH /user/:id`, `DELETE /user/:id` — hiện **ai cũng gọi được**, kể cả sửa/xóa user và đổi mật khẩu người khác.
-- Phân quyền (role admin/user) và `RolesGuard`.
+- Guard cho `GET /users`, `GET /users/:id`, `PATCH /users/:id`, `DELETE /users/:id` — hiện **ai cũng gọi được**, kể cả sửa/xóa user và đổi mật khẩu người khác.
+- Phân quyền (role admin/users) và `RolesGuard`.
 - Thu hồi access token (blacklist) — logout chỉ xoá refresh token.
 - CORS cho frontend chạy khác origin.
 - Rate limiting / brute-force protection cho login.
@@ -734,7 +743,8 @@ Hiện chưa có unit test / e2e test riêng cho `AuthService`, `UserService`, c
 - Prettier: `singleQuote: true`, `trailingComma: "all"`.
 - Oxlint: type-aware, tắt `typescript/no-explicit-any`, bật `typescript/no-floating-promises`.
 - TypeScript strict, `strictPropertyInitialization: false` (thuận tiện cho DTO/schema).
-- Mỗi module NestJS gồm: `*.module.ts`, `*.controller.ts`, `*.service.ts`, `dto/`, `schemas/` (nếu cần), `guards/`, `strategies/` (với auth).
+- Mỗi module NestJS gồm: `*.module.ts`, `*.controller.ts`, `*.service.ts`, `dto/`, `schemas/` (nếu cần), `interfaces/`, `guards/`, `strategies/` (với auth).
+- Interface/type dùng chung trong module đặt ở `interfaces/*.interface.ts`; util dùng chung đặt ở `common/utils/`.
 - Service ném exception của Nest (`NotFoundException`, `ConflictException`, `UnauthorizedException`) thay vì trả mã lỗi thủ công.
 - `UserService` chỉ cung cấp **query thô** + CRUD; logic xác thực/token nằm ở `AuthService`.
 
@@ -744,24 +754,23 @@ Hiện chưa có unit test / e2e test riêng cho `AuthService`, `UserService`, c
 
 ### Đã biết / cần lưu ý
 
-1. **Route `/user` (list/detail/update/delete) chưa được bảo vệ** — bất kỳ ai cũng có thể list/sửa/xóa user, kể cả đổi mật khẩu người khác.
+1. **Route `/users` (list/detail/update/delete) chưa được bảo vệ** — bất kỳ ai cũng có thể list/sửa/xóa user, kể cả đổi mật khẩu người khác.
 2. **Logout không thu hồi access token** — access token vẫn dùng được đến khi hết hạn (JWT stateless).
 3. **Login phân biệt chữ hoa/thường của email** — email lưu lowercase nhưng `findByEmail` query nguyên giá trị client gửi; nên chuẩn hóa `email.toLowerCase()` trước khi query.
 4. **Refresh token hash bằng bcrypt** — bcrypt cắt input ở 72 byte; với JWT nên dùng SHA-256 (hoặc lưu raw có kiểm soát) để so sánh chính xác toàn bộ token.
 5. **Register tự động đăng nhập** — nếu sau này thêm xác minh email/duyệt tài khoản, cần bỏ `generateTokens` khỏi luồng register.
-6. **Chưa có role** — chưa thể phân quyền admin/user.
-7. **`GET /user` không phân trang** — sẽ chậm khi dữ liệu lớn.
-8. **Không có response DTO** — trả trực tiếp Mongoose document; nên map sang response DTO để kiểm soát shape dữ liệu.
+6. **Chưa có role** — chưa thể phân quyền admin/users.
+7. **`GET /users` không phân trang** — sẽ chậm khi dữ liệu lớn.
+8. **Service trả Mongoose document** — controller map qua `UserService.toResponse`; nếu cần shape khác nhau cho admin/public thì tách thêm hàm map.
 9. **Chưa bật CORS** trong `main.ts` → frontend khác origin sẽ bị chặn.
 10. **Chưa có Swagger/OpenAPI** — nên thêm `@nestjs/swagger`.
 11. **E2E test phụ thuộc MongoDB thật** — nên dùng `mongodb-memory-server` hoặc database test riêng.
 12. **Chưa có rate limit cho login/refresh** — dễ bị brute-force.
 13. **Chưa có health check thực sự** — `GET /` chỉ trả `Hello World!`.
-14. **`.env` đang sai tên `JWT_REFERESH_SECRET`** — code có fallback nhưng nên sửa lại cho đúng.
 
 ### Roadmap gợi ý cho đồ án e-commerce
 
-- [ ] Bảo vệ toàn bộ route `/user` (guard) + `GET /user/me` là nguồn profile chính.
+- [ ] Bảo vệ toàn bộ route `/users` (guard) + `GET /users/me` là nguồn profile chính.
 - [ ] Thêm `role` vào User + `RolesGuard` (admin quản lý user/sản phẩm).
 - [ ] Module `products` (CRUD, filter, search, phân trang, upload ảnh).
 - [ ] Module `categories`.
@@ -781,9 +790,9 @@ Hiện chưa có unit test / e2e test riêng cho `AuthService`, `UserService`, c
 - Luồng đề xuất:
   1. `POST /auth/register` (nếu chưa có tài khoản) → nhận ngay `accessToken` + `refreshToken`; hoặc `POST /auth/login` nếu đã có tài khoản.
   2. Lưu `accessToken` (bộ nhớ/state) và `refreshToken` (nơi an toàn, ưu tiên httpOnly cookie nếu backend hỗ trợ).
-  3. Gọi API bảo vệ với header `Authorization: Bearer <accessToken>` (ví dụ `GET /user/me`, `POST /auth/logout`).
+  3. Gọi API bảo vệ với header `Authorization: Bearer <accessToken>` (ví dụ `GET /users/me`, `POST /auth/logout`).
   4. Khi gặp `401` do access token hết hạn → `POST /auth/refresh` với `{ refreshToken }` → lưu cặp token mới → retry request cũ một lần.
   5. Nếu refresh cũng `401` → xoá token, điều hướng về trang đăng nhập.
-- Endpoint auth: `/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`; endpoint user: `/user` (số ít), profile: `/user/me`.
+- Endpoint auth: `/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`; endpoint user: `/users`, profile: `/users/me`.
 - Nếu frontend chạy port khác (Ví dụ Vite 5173 / Next.js 3000), cần bật CORS ở backend hoặc cấu hình proxy.
 - Response không bao giờ chứa `password`; refresh token chỉ trả về đúng lúc login/refresh (DB chỉ lưu hash).

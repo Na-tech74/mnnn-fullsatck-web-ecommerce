@@ -1,95 +1,114 @@
-import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
-import { InjectModel } from "@nestjs/mongoose";
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
 
-import * as bcrypt from 'bcrypt';
+import { Model } from 'mongoose';
 
-import { Model, Types } from "mongoose";
-import { User, UserDocument } from "./schemas/user.schema";
-
-import { CreateUserDto } from "./dto/create-user.dto";
-import { UpdateUserDto } from "./dto/update-user.dto";
-
-const SALT_ROUNDS = 10;
-const DUPLICATE_KEY_CODE = 11000;
+import { DUPLICATE_KEY_CODE } from '../../common/constants/app.constant';
+import { ERROR_MESSAGES } from '../../common/constants/messages.constant';
+import { hashPassword } from '../../common/utils/password.util';
+import { CreateUserDto } from './dto/create-user.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
+import type { IUserResponse } from './interfaces/user.interface';
+import { User, UserDocument } from './schemas/user.schema';
 
 @Injectable()
 export class UserService {
+  public constructor(
+    @InjectModel(User.name)
+    private readonly userModel: Model<UserDocument>,
+  ) {}
 
-    constructor(@InjectModel(User.name)
-    private readonly userModel: Model<UserDocument>) { };
+  private handleDuplicateKey(error: any): never {
+    if (error?.code === DUPLICATE_KEY_CODE) {
+      throw new ConflictException(ERROR_MESSAGES.EMAIL_EXISTS);
+    }
+    throw error;
+  }
 
-    // ---------- helpers ----------
+  private ensureFound(user: UserDocument | null): UserDocument {
+    if (!user) {
+      throw new NotFoundException(ERROR_MESSAGES.USER_NOT_FOUND);
+    }
+    return user;
+  }
 
-    /*
-     handleDuplicateKey: catches the 11000 error and converts it into a ConflictException (409).
-     Otherwise, the error propagates outward, and the client receives a 500 response.
-     */
-    private handleDuplicateKey(error: any): never {
-        if (error?.code === DUPLICATE_KEY_CODE) {
-            throw new ConflictException('Email already exists');
-        };
-        throw error;
+  public toResponse(user: UserDocument): IUserResponse {
+    return {
+      _id: String(user._id),
+      name: user.name,
+      email: user.email,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
     };
+  }
 
-    private ensureFound(user: UserDocument | null): UserDocument {
-        if (!user) {
-            throw new NotFoundException('User not found')
-        };
-        return user;
+  public async createUser(dto: CreateUserDto): Promise<UserDocument> {
+    const password = await hashPassword(dto.password);
+
+    try {
+      return await this.userModel.create({
+        name: dto.name,
+        email: dto.email,
+        password,
+      });
+    } catch (error) {
+      this.handleDuplicateKey(error);
+    }
+  }
+
+  public async findByEmail(email: string): Promise<UserDocument | null> {
+    return this.userModel.findOne({ email }).select('+password').exec();
+  }
+
+  public async findById(_id: string): Promise<UserDocument | null> {
+    return this.userModel.findById(_id).exec();
+  }
+
+  public async findAll(): Promise<UserDocument[]> {
+    return this.userModel.find().exec();
+  }
+
+  public async findOne(_id: string): Promise<UserDocument> {
+    const user = await this.findById(_id);
+    return this.ensureFound(user);
+  }
+
+  public async updateUser(
+    _id: string,
+    dto: UpdateUserDto,
+  ): Promise<UserDocument> {
+    const updateData: UpdateUserDto = {};
+
+    if (dto.name !== undefined) {
+      updateData.name = dto.name;
+    }
+    if (dto.email !== undefined) {
+      updateData.email = dto.email;
+    }
+    if (dto.password !== undefined) {
+      updateData.password = await hashPassword(dto.password);
     }
 
-    //--------------CRUD------------------
+    try {
+      const user = await this.userModel
+        .findByIdAndUpdate(_id, updateData, {
+          new: true,
+          runValidators: true,
+        })
+        .exec();
 
-    // Create user: used in auth.service to implement the register method.
-    async createUser(dto: CreateUserDto): Promise<UserDocument> {
-        const password = await bcrypt.hash(dto.password, SALT_ROUNDS);
-        try {
-            return await this.userModel.create({ ...dto, password })
-        } catch (error) {
-            this.handleDuplicateKey(error);
-        };
-    };
+      return this.ensureFound(user);
+    } catch (error) {
+      this.handleDuplicateKey(error);
+    }
+  }
 
-    async findByEmail(email: string): Promise<UserDocument | null> {
-        return this.userModel.findOne({ email }).select('+password').exec();
-    };
-
-    async findById(_id: string): Promise<UserDocument | null> {
-        return this.userModel.findById(_id).exec();
-    };
-
-    async findAll(): Promise<UserDocument[]> {
-        return this.userModel.find().exec();
-    };
-
-    async findOne(_id: string): Promise<UserDocument> {
-        const user = await this.findById(_id)
-        return this.ensureFound(user);
-    };
-
-    async updateUser(_id: string, dto: UpdateUserDto): Promise<UserDocument> {
-
-        const updateData = { ...dto };
-        if (updateData.password) {
-            updateData.password = await bcrypt.hash(updateData.password, SALT_ROUNDS);
-        };
-
-        try {
-            const user = await this.userModel.findByIdAndUpdate(_id, updateData, {
-                new: true,
-                runValidators: true,
-            }).exec();
-
-            return this.ensureFound(user)
-
-        } catch (error) {
-            this.handleDuplicateKey(error);
-        };
-    };
-
-    async deleteUser(_id: string): Promise<void> {
-        const user = await this.userModel.findByIdAndDelete(_id).exec();
-        this.ensureFound(user);
-    };
-
-};
+  public async deleteUser(_id: string): Promise<void> {
+    const user = await this.userModel.findByIdAndDelete(_id).exec();
+    this.ensureFound(user);
+  }
+}

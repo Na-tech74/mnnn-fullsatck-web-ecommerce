@@ -1,44 +1,67 @@
-import { Controller, Get, HttpCode, Body, Param, Patch, Delete, Req, UseGuards } from "@nestjs/common";
-import { UserService } from "./users.service";
-import { UpdateUserDto } from "./dto/update-user.dto";
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  Patch,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 
-import { ParseObjectIdPipe } from "../../common/pipes/parse-object-id.pipe";
-import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
+import { ParseObjectIdPipe } from '../../common/pipes/parse-object-id.pipe';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import type { IAuthenticatedRequest } from '../auth/interfaces/auth.interface';
+import { UpdateUserDto } from './dto/update-user.dto';
+import type { IUserResponse } from './interfaces/user.interface';
+import { UserService } from './users.service';
 
-@Controller('user')
+@Controller('users')
 export class UserController {
+  public constructor(private readonly userService: UserService) {}
 
-    constructor(private readonly userService: UserService) { }
+  @Get('me')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  public async getProfile(
+    @Req() req: IAuthenticatedRequest,
+  ): Promise<IUserResponse> {
+    const user = await this.userService.findOne(req.user._id);
+    return this.userService.toResponse(user);
+  }
 
-    @Get('me')
-    @UseGuards(JwtAuthGuard)
-    @HttpCode(200)
-    getProfile(@Req() req: { user: { _id: string } }) {
-        return this.userService.findOne(req.user._id);
-    };
+  @Get()
+  @HttpCode(200)
+  public async findAll(): Promise<IUserResponse[]> {
+    const users = await this.userService.findAll();
+    return users.map((user) => this.userService.toResponse(user));
+  }
 
-    @Get()
-    @HttpCode(200)
-    findAll() {
-        return this.userService.findAll();
-    };
+  @Get(':id')
+  @HttpCode(200)
+  public async findOne(
+    @Param('id', ParseObjectIdPipe) _id: string,
+  ): Promise<IUserResponse> {
+    const user = await this.userService.findOne(_id);
+    return this.userService.toResponse(user);
+  }
 
-    @Get(':id')
-    @HttpCode(200)
-    findOne(@Param('id', ParseObjectIdPipe) _id: string) {
-        return this.userService.findOne(_id);
-    };
+  @Patch(':id')
+  @HttpCode(200)
+  public async updateUser(
+    @Param('id', ParseObjectIdPipe) _id: string,
+    @Body() dto: UpdateUserDto,
+  ): Promise<IUserResponse> {
+    const user = await this.userService.updateUser(_id, dto);
+    return this.userService.toResponse(user);
+  }
 
-
-    @Patch(':id')
-    @HttpCode(200)
-    updateUser(@Param('id', ParseObjectIdPipe) _id: string, @Body() dto: UpdateUserDto,) {
-        return this.userService.updateUser(_id, dto);
-    };
-
-    @Delete(':id')
-    @HttpCode(200)
-    deleteUser(@Param('id', ParseObjectIdPipe) _id: string) {
-        return this.userService.deleteUser(_id)
-    };
+  @Delete(':id')
+  @HttpCode(200)
+  public async deleteUser(
+    @Param('id', ParseObjectIdPipe) _id: string,
+  ): Promise<void> {
+    return this.userService.deleteUser(_id);
+  }
 }
