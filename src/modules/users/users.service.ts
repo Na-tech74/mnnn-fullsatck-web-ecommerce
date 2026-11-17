@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException, UnauthorizedException } from "@nestjs/common";
+import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { InjectModel } from "@nestjs/mongoose";
 
 import * as bcrypt from 'bcrypt';
@@ -50,15 +50,12 @@ export class UserService {
         };
     };
 
-    // find by email with password : used in auth.service to implement the login method.
-    async findByEmailWithPassword(email: string): Promise<UserDocument> {
-        const user = await this.userModel.findOne({ email })
-            .select('+password')
-            .exec();
-        if (!user) {
-            throw new UnauthorizedException('Invalid credentials');
-        };
-        return user;
+    async findByEmail(email: string): Promise<UserDocument | null> {
+        return this.userModel.findOne({ email }).select('+password').exec();
+    };
+
+    async findById(_id: string): Promise<UserDocument | null> {
+        return this.userModel.findById(_id).exec();
     };
 
     async findAll(): Promise<UserDocument[]> {
@@ -66,7 +63,7 @@ export class UserService {
     };
 
     async findOne(_id: string): Promise<UserDocument> {
-        const user = await this.userModel.findById(_id).exec()
+        const user = await this.findById(_id)
         return this.ensureFound(user);
     };
 

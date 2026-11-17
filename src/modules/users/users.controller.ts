@@ -1,19 +1,20 @@
-import { Controller, Post, Get, HttpCode, Body, Param, Put, Patch, Delete } from "@nestjs/common";
+import { Controller, Get, HttpCode, Body, Param, Patch, Delete, Req, UseGuards } from "@nestjs/common";
 import { UserService } from "./users.service";
-import { CreateUserDto } from "./dto/create-user.dto";
 import { UpdateUserDto } from "./dto/update-user.dto";
 
 import { ParseObjectIdPipe } from "../../common/pipes/parse-object-id.pipe";
+import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 
 @Controller('user')
 export class UserController {
 
     constructor(private readonly userService: UserService) { }
 
-    @Post()
-    @HttpCode(201)
-    createUser(@Body() dto: CreateUserDto) {
-        return this.userService.createUser(dto);
+    @Get('me')
+    @UseGuards(JwtAuthGuard)
+    @HttpCode(200)
+    getProfile(@Req() req: { user: { _id: string } }) {
+        return this.userService.findOne(req.user._id);
     };
 
     @Get()

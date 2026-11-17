@@ -18,6 +18,8 @@ export class User {
     @Prop({ required: true, select: false, })
     password: string;
 
+    @Prop({ type: String, default: null, select: false })
+    refreshToken: string | null;
 };
 
 //Defining a schema with Mongoose
@@ -27,7 +29,9 @@ export const UserSchema = SchemaFactory.createForClass(User);
 UserSchema.set('toJSON', {
     transform: (_doc, ret: Record<string, any>) => {
         delete ret.password;
+        delete ret.refreshToken;
         delete ret.__v;
-        return ret;
+        const { _id, name, email, createdAt, updatedAt, ...rest } = ret;
+        return { _id, name, email, createdAt, updatedAt, ...rest };
     },
 });
